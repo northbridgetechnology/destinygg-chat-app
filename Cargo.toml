@@ -1,0 +1,39 @@
+[package]
+name = "dgg-desktop"
+version = "0.1.2"
+edition = "2024"
+description = "A native Destiny.gg Bigscreen client"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
+eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+futures-util = { version = "0.3", features = ["sink"] }
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["native-tls", "json", "query", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-tungstenite = { version = "0.29", features = ["native-tls"] }
+url = "2"
+webbrowser = "1"
+wry = { version = "0.57.1", default-features = false, features = ["os-webview"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-graphics = "0.23"
+foreign-types = "0.5"
+security-framework = "3"
+
+[target.'cfg(any(target_os = "windows", target_os = "linux"))'.dependencies]
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6", features = ["windows-native"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.31.1", default-features = false, features = ["x11"] }
+gtk = "0.18"
+keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
+
+[profile.release]
+strip = true
