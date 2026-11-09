@@ -3,6 +3,7 @@ mod app;
 mod assets;
 mod channels;
 mod chat;
+mod drawer;
 mod player;
 
 use eframe::egui;

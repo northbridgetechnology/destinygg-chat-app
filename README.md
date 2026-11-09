@@ -36,6 +36,14 @@ Sign-in takes place on Destiny.gg and its linked provider’s pages. The app use
 | Twitch | Channels, VODs, and clips |
 | Rumble | Embed URLs |
 
+## Left-side panels
+
+- **TTS** opens the official [Destiny.gg TTS Queue](https://www.destiny.gg/tts).
+- **Vestaboard** opens the official [Destiny.gg Vestaboard](https://www.destiny.gg/vestaboard).
+- **Profile** or your username opens account settings and chat preferences. **Connect DGG account** opens sign-in in the same panel.
+
+Each panel slides in from the left and makes the player narrower while the stream keeps playing. Click **Close** or click the same header button to give the space back to the player. The TTS and Vestaboard panels also offer a **Browser** button to open the page externally.
+
 ## Chat only and popout
 
 Click **Hide video** in the header to unload the player and stop fetching video. Docked chat expands to fill the window, and popped-out chat stays in its separate window. Chat and emote images still use the network. **Show video** restores the selected stream. The app remembers your chat-only preference between launches.
@@ -44,6 +52,7 @@ Click **Hide video** in the header to unload the player and stop fetching video.
 
 - **Pop out chat** opens a separate native window. Click **Dock** or close the popout to return it to the main window.
 - Drag the divider left to widen docked chat or right to narrow it. The app remembers the width.
+- Scroll up to hold your place while new messages arrive. Scroll to the bottom or click **Jump to latest** to catch up and resume following live chat.
 - Click **Whispers** to read messages received during the current session. Use `/w nickname message` to send one and `/r message` to reply to your most recent correspondent.
 - Click a username to insert a mention. The username context menu also offers **Whisper** and **Ignore user**. Timestamps, emote animation, and the ignore list are managed in preferences.
 
@@ -122,7 +131,7 @@ Cargo places the release executable in `target/release/dgg-desktop`.
 
 - `src/app.rs` contains the interface and routes chat, poll, and player state.
 - `src/chat.rs` handles the chat connection and DGG message formats. `src/channels.rs` tracks temporary channel tabs.
-- `src/player.rs` resolves stream links and manages the embedded player.
+- `src/player.rs` resolves stream links and manages the embedded player. `src/drawer.rs` manages the TTS and Vestaboard views.
 - `src/account.rs` handles sign-in and storage of the DGG session. `src/assets/` contains the native and portable image decoders.
 
 ```sh

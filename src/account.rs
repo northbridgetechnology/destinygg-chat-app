@@ -17,8 +17,8 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn cookie_header(&self) -> Option<String> {
-        let cookies: Vec<_> = [
+    pub fn cookies(&self) -> impl Iterator<Item = (&'static str, &str)> {
+        [
             ("sid", self.sid.as_deref()),
             ("rememberme", self.rememberme.as_deref()),
         ]
@@ -26,9 +26,15 @@ impl Session {
         .filter_map(|(name, value)| {
             value
                 .filter(|value| valid_cookie(value))
-                .map(|value| format!("{name}={value}"))
+                .map(|value| (name, value))
         })
-        .collect();
+    }
+
+    pub fn cookie_header(&self) -> Option<String> {
+        let cookies: Vec<_> = self
+            .cookies()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
         (!cookies.is_empty()).then(|| cookies.join("; "))
     }
 

@@ -16,6 +16,7 @@ use crate::{
     assets::{Catalog, Images},
     channels::RecentChannels,
     chat::{self, Command, Connection, Event, Poll, Post, User},
+    drawer::{Drawer, SiteView},
     player::{self, Live, Player, Stream},
 };
 
@@ -65,9 +66,21 @@ enum LineKind {
     Whisper,
 }
 
+#[derive(Clone)]
 struct Line {
     post: Post,
     kind: LineKind,
+}
+
+#[derive(Default)]
+struct Transcript {
+    paused: Option<PausedTranscript>,
+    jump_to_bottom: bool,
+}
+
+struct PausedTranscript {
+    lines: Vec<Line>,
+    offset: f32,
 }
 
 enum Update {
@@ -83,6 +96,7 @@ pub struct Desktop {
     connection: Connection,
     has_session: bool,
     session_saved: bool,
+    session: Option<Session>,
     sign_in: SignIn,
     session_pending: Option<Session>,
     online: bool,
@@ -97,6 +111,8 @@ pub struct Desktop {
     last_whisper: Option<String>,
     unread: usize,
     show_whispers: bool,
+    chat_scroll: Transcript,
+    whisper_scroll: Transcript,
     pin: Option<Post>,
     poll: Option<Poll>,
     draft: String,
@@ -112,7 +128,8 @@ pub struct Desktop {
     picker_search: String,
     only_favorites: bool,
     prefs: Preferences,
-    settings: bool,
+    drawer: Option<Drawer>,
+    drawer_site: SiteView,
     live: Option<Vec<Live>>,
     stream_error: Option<String>,
     stream_pending: bool,
@@ -150,7 +167,7 @@ impl Desktop {
             Err(error) => (None, Some(format!("Credential store: {error}"))),
         };
         let has_session = session.is_some();
-        let connection = Connection::spawn(&runtime, &cc.egui_ctx, session);
+        let connection = Connection::spawn(&runtime, &cc.egui_ctx, session.clone());
         Ok(Self {
             runtime,
             http: http.clone(),
@@ -159,6 +176,7 @@ impl Desktop {
             connection,
             has_session,
             session_saved: has_session,
+            session,
             sign_in: SignIn::default(),
             session_pending: None,
             online: false,
@@ -173,6 +191,8 @@ impl Desktop {
             last_whisper: None,
             unread: 0,
             show_whispers: false,
+            chat_scroll: Transcript::default(),
+            whisper_scroll: Transcript::default(),
             pin: None,
             poll: None,
             draft: String::new(),
@@ -188,7 +208,8 @@ impl Desktop {
             picker_search: String::new(),
             only_favorites: false,
             prefs,
-            settings: false,
+            drawer: None,
+            drawer_site: SiteView::default(),
             live: None,
             stream_error: None,
             stream_pending: false,
@@ -205,12 +226,15 @@ impl Desktop {
 
     fn reconnect(&mut self, ctx: &egui::Context, session: Option<Session>) {
         self.has_session = session.is_some();
+        self.session = session.clone();
+        self.drawer_site.close();
         self.online = false;
         self.status = "Connecting…".into();
         self.me = User::default();
         self.poll = None;
         self.pin = None;
         self.whispers.clear();
+        self.whisper_scroll = Transcript::default();
         self.last_whisper = None;
         self.unread = 0;
         self.pending_whisper = None;
@@ -367,7 +391,7 @@ impl Desktop {
                             self.session_saved = session.can_remember();
                         }
                         self.sign_in.close();
-                        self.settings = false;
+                        self.set_drawer(None);
                     }
                 } else if self.has_session && self.me.nick.is_empty() && !self.sign_in.open {
                     self.alert = Some(
@@ -668,9 +692,6 @@ impl Desktop {
 
     fn tune(&mut self, stream: Stream) {
         self.tuned = Some(stream);
-        if !self.sign_in.open {
-            self.settings = false;
-        }
         self.alert = None;
     }
 
@@ -690,23 +711,23 @@ impl eframe::App for Desktop {
             while gtk::events_pending() {
                 gtk::main_iteration_do(false);
             }
-            if self.sign_in.open || !self.prefs.video_hidden {
+            if self.sign_in.open || self.drawer.is_some() || !self.prefs.video_hidden {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
         }
         self.collect(ctx);
         self.header(ctx);
         let video_hidden = self.prefs.video_hidden;
-        let account_open = self.sign_in.open || self.settings;
-        if video_hidden || account_open {
+        if video_hidden {
             self.player.reset();
         }
+        self.left_drawer(ctx, frame);
         if self.prefs.detached {
             self.popout(ctx);
-        } else if (account_open || !video_hidden) && !self.player_expanded {
+        } else if !video_hidden && !self.player_expanded {
             self.docked_chat(ctx);
         }
-        let background = if video_hidden && !account_open && !self.prefs.detached {
+        let background = if video_hidden && !self.prefs.detached {
             PANEL
         } else {
             BG
@@ -714,11 +735,7 @@ impl eframe::App for Desktop {
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(background).inner_margin(16))
             .show(ctx, |ui| {
-                if self.sign_in.open {
-                    self.sign_in_panel(ui, frame);
-                } else if self.settings {
-                    self.account(ui);
-                } else if !video_hidden {
+                if !video_hidden {
                     self.watch(ui, frame);
                 } else if self.prefs.detached {
                     ui.label(quiet("Chat is open in a separate window."));
@@ -869,17 +886,29 @@ impl Desktop {
                                 .clicked()
                         {
                             self.alert = None;
+                            self.set_drawer(Some(Drawer::Profile));
                             self.sign_in.begin();
                         }
-                        let settings_label = if self.me.nick.is_empty() {
-                            "Preferences"
+                        let profile_label = if self.me.nick.is_empty() {
+                            "Profile"
                         } else {
                             &self.me.nick
                         };
-                        if !self.sign_in.open
-                            && ui.selectable_label(self.settings, settings_label).clicked()
+                        if ui
+                            .selectable_label(self.drawer == Some(Drawer::Profile), profile_label)
+                            .clicked()
                         {
-                            self.settings = !self.settings;
+                            self.toggle_drawer(Drawer::Profile, ui.ctx());
+                        }
+                        for (drawer, label) in
+                            [(Drawer::Vestaboard, "Vestaboard"), (Drawer::Tts, "TTS")]
+                        {
+                            if ui
+                                .selectable_label(self.drawer == Some(drawer), label)
+                                .clicked()
+                            {
+                                self.toggle_drawer(drawer, ui.ctx());
+                            }
                         }
                         if ui
                             .button(if self.prefs.detached {
@@ -920,58 +949,61 @@ impl Desktop {
     }
 
     fn watch(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("Now watching").size(19.0).strong());
             if let Some(stream) = self.current_stream() {
                 ui.label(badge(stream.name().to_ascii_uppercase(), ACCENT));
             }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button(if self.player_expanded {
-                        "Show chat"
-                    } else {
-                        "Theater"
-                    })
-                    .clicked()
-                {
-                    self.player_expanded = !self.player_expanded;
-                }
-                if ui
-                    .add_enabled(self.tuned.is_some(), egui::Button::new("Back to Destiny"))
-                    .clicked()
-                {
-                    self.tuned = None;
-                }
-            });
+            if ui
+                .button(if self.player_expanded {
+                    "Show chat"
+                } else {
+                    "Theater"
+                })
+                .clicked()
+            {
+                self.player_expanded = !self.player_expanded;
+            }
+            if ui
+                .add_enabled(self.tuned.is_some(), egui::Button::new("Back to Destiny"))
+                .clicked()
+            {
+                self.tuned = None;
+            }
         });
         self.channel_tabs(ui);
-        ui.horizontal(|ui| {
-            let id = ui.id().with("channel");
-            let width = (ui.available_width() - 160.0).max(105.0);
-            let field = ui.add_sized(
-                [width, 28.0],
-                egui::TextEdit::singleline(&mut self.channel_input)
-                    .id(id)
-                    .hint_text("Paste a stream URL or #kick/channel"),
-            );
-            let enter = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-            if ui.button("Tune").clicked() || enter {
-                if let Some(stream) = Stream::parse(self.channel_input.trim()) {
-                    self.channel_input.clear();
-                    self.tune(stream);
-                } else {
-                    self.alert = Some(
-                        "Enter a supported Kick, YouTube, Twitch, or Rumble stream link.".into(),
-                    );
+        ui.allocate_ui_with_layout(
+            egui::vec2(ui.available_width(), 28.0),
+            egui::Layout::right_to_left(egui::Align::Center),
+            |ui| {
+                if let Some(stream) = self.current_stream() {
+                    let url = stream.browser_url();
+                    if ui.small_button("Browser ↗").on_hover_text(&url).clicked() {
+                        open(&url);
+                    }
                 }
-            }
-            if let Some(stream) = self.current_stream() {
-                let url = stream.browser_url();
-                if ui.small_button("Browser ↗").on_hover_text(&url).clicked() {
-                    open(&url);
+                let tune = ui.button("Tune").clicked();
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut self.channel_input)
+                        .id(ui.id().with("channel"))
+                        .desired_width(f32::INFINITY)
+                        .hint_text("Paste a stream URL or #kick/channel"),
+                );
+                let enter =
+                    field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                if tune || enter {
+                    if let Some(stream) = Stream::parse(self.channel_input.trim()) {
+                        self.channel_input.clear();
+                        self.tune(stream);
+                    } else {
+                        self.alert = Some(
+                            "Enter a supported Kick, YouTube, Twitch, or Rumble stream link."
+                                .into(),
+                        );
+                    }
                 }
-            }
-        });
+            },
+        );
         if let Some(error) = self
             .alert
             .as_ref()
@@ -1141,17 +1173,95 @@ impl Desktop {
         }
     }
 
+    fn set_drawer(&mut self, drawer: Option<Drawer>) {
+        if self.drawer != drawer {
+            self.drawer_site.close();
+            self.drawer = drawer;
+        }
+    }
+
+    fn toggle_drawer(&mut self, drawer: Drawer, ctx: &egui::Context) {
+        let next = (self.drawer != Some(drawer)).then_some(drawer);
+        if self.sign_in.open {
+            self.cancel_sign_in(ctx);
+        }
+        self.set_drawer(next);
+    }
+
+    fn cancel_sign_in(&mut self, ctx: &egui::Context) {
+        self.sign_in.close();
+        self.session_pending = None;
+        if self.has_session && self.me.nick.is_empty() {
+            self.reconnect(ctx, None);
+        }
+        self.alert = None;
+    }
+
+    fn left_drawer(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        let progress = ctx.animate_bool_with_time(
+            egui::Id::new("left_drawer_slide"),
+            self.drawer.is_some(),
+            0.18,
+        );
+        if progress <= 0.0 {
+            return;
+        }
+        let reserve_chat =
+            if !self.prefs.detached && !self.player_expanded && !self.prefs.video_hidden {
+                MIN_CHAT_WIDTH
+            } else {
+                0.0
+            };
+        let width = (ctx.available_rect().width() - reserve_chat - 260.0).clamp(240.0, 420.0);
+        egui::SidePanel::left("left_drawer")
+            .exact_width(width * progress)
+            .resizable(false)
+            .frame(egui::Frame::new().fill(PANEL))
+            .show(ctx, |ui| {
+                ui.set_min_width(ui.available_width());
+                let Some(drawer) = self.drawer.filter(|_| progress >= 1.0) else {
+                    return;
+                };
+                egui::Frame::NONE.inner_margin(12).show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.heading(drawer.title());
+                        if ui.small_button("Close").clicked() {
+                            self.toggle_drawer(drawer, ui.ctx());
+                        }
+                        if let Some(url) = drawer.url() {
+                            if ui.small_button("Browser ↗").clicked() {
+                                open(&url);
+                            }
+                            if self.me.nick.is_empty() && ui.small_button("Sign in").clicked() {
+                                self.set_drawer(Some(Drawer::Profile));
+                                self.sign_in.begin();
+                            }
+                        }
+                    });
+                    if self.drawer != Some(drawer) {
+                        return;
+                    }
+                    ui.separator();
+                    if let Some(url) = drawer.url() {
+                        self.drawer_site
+                            .show(ui, frame, &url, self.session.as_ref());
+                    } else if self.sign_in.open {
+                        self.sign_in_panel(ui, frame);
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| self.account(ui));
+                    }
+                });
+            });
+    }
+
     fn sign_in_panel(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.heading("Connect your DGG account");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Cancel").clicked() {
-                    self.sign_in.close();
-                    self.session_pending = None;
-                    if self.has_session && self.me.nick.is_empty() {
-                        self.reconnect(ui.ctx(), None);
-                    }
-                    self.alert = None;
+                    self.cancel_sign_in(ui.ctx());
                 }
             });
         });
@@ -1379,6 +1489,20 @@ impl Desktop {
                 self.show_whispers = true;
                 self.unread = 0;
             }
+            let scroll = if self.show_whispers {
+                &mut self.whisper_scroll
+            } else {
+                &mut self.chat_scroll
+            };
+            if scroll.paused.is_some()
+                && ui
+                    .small_button("Jump to latest")
+                    .on_hover_text("Chat is paused while you read")
+                    .clicked()
+            {
+                scroll.paused = None;
+                scroll.jump_to_bottom = true;
+            }
         });
         if !self.show_whispers
             && let Some(pin) = &self.pin
@@ -1402,46 +1526,75 @@ impl Desktop {
                 }
                 self.composer(ui);
             });
-        let lines = if self.show_whispers {
-            &self.whispers
+        let (lines, scroll, scroll_id) = if self.show_whispers {
+            (&self.whispers, &mut self.whisper_scroll, "whispers")
         } else {
-            &self.lines
+            (&self.lines, &mut self.chat_scroll, "transcript")
         };
-        let messages = lines
-            .iter()
-            .filter(|line| {
-                !self
-                    .prefs
-                    .ignored
-                    .contains(&line.post.user.nick.to_ascii_lowercase())
-            })
-            .map(|line| (line.post.clone(), line.kind))
-            .collect::<Vec<_>>();
-        let scroll_id = if self.show_whispers {
-            "whispers"
+        let paused_offset = scroll.paused.as_ref().map(|paused| paused.offset);
+        let jump = std::mem::take(&mut scroll.jump_to_bottom);
+        let messages = if let Some(paused) = &scroll.paused {
+            paused.lines.clone()
         } else {
-            "transcript"
+            lines
+                .iter()
+                .filter(|line| {
+                    !self
+                        .prefs
+                        .ignored
+                        .contains(&line.post.user.nick.to_ascii_lowercase())
+                })
+                .cloned()
+                .collect()
         };
-        egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt(scroll_id)
-            .stick_to_bottom(true)
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                if messages.is_empty() {
-                    let label = if self.show_whispers {
-                        "New whispers will appear here. Use /w nickname message to send one."
-                    } else if self.online {
-                        "Waiting for new messages…"
-                    } else {
-                        "Connecting to Destiny.gg chat…"
-                    };
-                    ui.label(quiet(label));
-                }
-                ui.spacing_mut().item_spacing.y = 3.0;
-                for (post, kind) in messages {
-                    self.post(ui, &post, kind, true);
-                }
-            });
+            .stick_to_bottom(paused_offset.is_none())
+            .auto_shrink([false; 2]);
+        if let Some(offset) = paused_offset {
+            area = area.vertical_scroll_offset(offset);
+        }
+        let output = area.animated(!jump).show(ui, |ui| {
+            if messages.is_empty() {
+                let label = if self.show_whispers {
+                    "New whispers will appear here. Use /w nickname message to send one."
+                } else if self.online {
+                    "Waiting for new messages…"
+                } else {
+                    "Connecting to Destiny.gg chat…"
+                };
+                ui.label(quiet(label));
+            }
+            ui.spacing_mut().item_spacing.y = 3.0;
+            for line in &messages {
+                self.post(ui, &line.post, line.kind, true);
+            }
+            if jump {
+                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+            }
+        });
+        let scroll = if self.show_whispers {
+            &mut self.whisper_scroll
+        } else {
+            &mut self.chat_scroll
+        };
+        let remaining = output.content_size.y - output.inner_rect.height() - output.state.offset.y;
+        if remaining <= 1.0 {
+            if scroll.paused.take().is_some() {
+                scroll.jump_to_bottom = true;
+                ui.ctx().request_repaint();
+            }
+        } else if !jump {
+            if let Some(paused) = &mut scroll.paused {
+                paused.offset = output.state.offset.y;
+            } else {
+                scroll.paused = Some(PausedTranscript {
+                    lines: messages,
+                    offset: output.state.offset.y,
+                });
+                ui.ctx().request_repaint();
+            }
+        }
     }
 
     fn poll_panel(&mut self, ui: &mut egui::Ui) {
