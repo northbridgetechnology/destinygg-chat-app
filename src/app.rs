@@ -43,6 +43,7 @@ struct Preferences {
     detached: bool,
     video_hidden: bool,
     chat_width: f32,
+    emote_drawer_height: f32,
 }
 
 impl Default for Preferences {
@@ -55,6 +56,7 @@ impl Default for Preferences {
             detached: false,
             video_hidden: false,
             chat_width: 410.0,
+            emote_drawer_height: 220.0,
         }
     }
 }
@@ -141,6 +143,7 @@ pub struct Desktop {
     player: Player,
     player_expanded: bool,
     divider_offset: Option<f32>,
+    emote_resize_offset: Option<f32>,
 }
 
 impl Desktop {
@@ -221,6 +224,7 @@ impl Desktop {
             player: Player::default(),
             player_expanded: false,
             divider_offset: None,
+            emote_resize_offset: None,
         })
     }
 
@@ -1373,44 +1377,8 @@ impl Desktop {
                     egui::pos2(edge, available.top()),
                     egui::pos2(edge + 12.0, available.bottom()),
                 );
-                let (pointer_x, hovered) = ui.input(|input| {
-                    let mut pointer_x = None;
-                    // Anchor to the press position, even when movement and release arrive in the same frame.
-                    for event in &input.events {
-                        match event {
-                            egui::Event::PointerButton {
-                                pos,
-                                button: egui::PointerButton::Primary,
-                                pressed: true,
-                                ..
-                            } if grab.contains(*pos) => {
-                                self.divider_offset = Some(pos.x - edge);
-                            }
-                            egui::Event::PointerMoved(pos) if self.divider_offset.is_some() => {
-                                pointer_x = Some(pos.x - self.divider_offset.unwrap());
-                            }
-                            egui::Event::PointerButton {
-                                pos,
-                                button: egui::PointerButton::Primary,
-                                pressed: false,
-                                ..
-                            } => {
-                                if let Some(offset) = self.divider_offset.take() {
-                                    pointer_x = Some(pos.x - offset);
-                                }
-                            }
-                            egui::Event::WindowFocused(false) => self.divider_offset = None,
-                            _ => {}
-                        }
-                    }
-                    (
-                        pointer_x,
-                        input
-                            .pointer
-                            .hover_pos()
-                            .is_some_and(|pos| grab.contains(pos)),
-                    )
-                });
+                let (pointer_x, hovered) =
+                    resize_edge(ui, grab, edge, |pos| pos.x, &mut self.divider_offset);
                 if let Some(x) = pointer_x {
                     self.prefs.chat_width = (available.right() - x).clamp(MIN_CHAT_WIDTH, max);
                     ctx.request_repaint();
@@ -1520,12 +1488,12 @@ impl Desktop {
                 top: 6,
                 ..Default::default()
             }))
-            .show_inside(ui, |ui| {
-                if self.show_picker {
-                    self.emote_picker(ui);
-                }
-                self.composer(ui);
-            });
+            .show_inside(ui, |ui| self.composer(ui));
+        if self.show_picker {
+            self.emote_drawer(ui);
+        } else {
+            self.emote_resize_offset = None;
+        }
         let (lines, scroll, scroll_id) = if self.show_whispers {
             (&self.whispers, &mut self.whisper_scroll, "whispers")
         } else {
@@ -1705,31 +1673,34 @@ impl Desktop {
             });
         }
         let id = ui.id().with("message_input");
-        let suggestion = if ui.memory(|memory| memory.has_focus(id)) {
-            self.suggestion()
-        } else {
-            None
-        };
-        if let Some(suggestion) = suggestion {
-            ui.memory_mut(|memory| {
-                memory.set_focus_lock_filter(
-                    id,
-                    egui::EventFilter {
-                        tab: true,
-                        ..Default::default()
-                    },
-                )
-            });
-            let tab =
-                ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
-            if tab || ui.small_button(format!("Tab   {suggestion}")).clicked() {
-                let pos = self.draft.rfind(char::is_whitespace).map_or(0, |i| {
-                    i + self.draft[i..].chars().next().unwrap().len_utf8()
+        if ui.memory(|memory| memory.has_focus(id)) {
+            let state = egui::TextEdit::load_state(ui.ctx(), id);
+            let cursor = state.as_ref().and_then(|state| state.cursor.char_range());
+            if let Some((range, suggestion)) = self.completion(cursor) {
+                let tab = ui.input_mut(|input| {
+                    let mut pressed = false;
+                    input.events.retain(|event| {
+                        let complete = matches!(event, egui::Event::Key {
+                            key: egui::Key::Tab, pressed: true, modifiers, ..
+                        } if modifiers.is_none());
+                        pressed |= complete;
+                        !complete
+                    });
+                    pressed
                 });
-                self.draft.truncate(pos);
-                self.draft.push_str(&suggestion);
-                self.draft.push(' ');
-                self.focus_input = true;
+                if tab || ui.small_button(format!("Tab   {suggestion}")).clicked() {
+                    let position =
+                        self.draft[..range.start].chars().count() + suggestion.chars().count() + 1;
+                    self.draft.replace_range(range, &format!("{suggestion} "));
+                    let mut state = state.unwrap_or_default();
+                    state
+                        .cursor
+                        .set_char_range(Some(egui::text::CCursorRange::one(
+                            egui::text::CCursor::new(position),
+                        )));
+                    state.store(ui.ctx(), id);
+                    ui.memory_mut(|memory| memory.request_focus(id));
+                }
             }
         }
         ui.allocate_ui_with_layout(
@@ -1747,24 +1718,39 @@ impl Desktop {
                 } else {
                     "Message DGG Chat"
                 };
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut self.draft)
-                        .id(id)
-                        .desired_width(f32::INFINITY)
-                        .min_size(egui::vec2(0.0, 30.0))
-                        .vertical_align(egui::Align::Center)
-                        .hint_text(hint),
-                );
+                let mut edit = egui::TextEdit::singleline(&mut self.draft)
+                    .id(id)
+                    .desired_width(f32::INFINITY)
+                    .min_size(egui::vec2(0.0, 30.0))
+                    .vertical_align(egui::Align::Center)
+                    .hint_text(hint)
+                    .show(ui);
+                let field = edit.response;
+                let mut cursor = edit.state.cursor.char_range();
                 if self.focus_input {
                     field.request_focus();
-                    let mut state = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-                    state
-                        .cursor
-                        .set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(self.draft.chars().count()),
-                        )));
-                    state.store(ui.ctx(), id);
+                    cursor = Some(egui::text::CCursorRange::one(egui::text::CCursor::new(
+                        self.draft.chars().count(),
+                    )));
+                    edit.state.cursor.set_char_range(cursor);
+                    edit.state.store(ui.ctx(), id);
                     self.focus_input = false;
+                }
+                if field.has_focus() {
+                    // TextEdit sets its own filter while drawing. Install ours afterwards
+                    // so egui sees it before it dispatches Tab on the next frame.
+                    let complete = self.completion(cursor).is_some();
+                    ui.memory_mut(|memory| {
+                        memory.set_focus_lock_filter(
+                            id,
+                            egui::EventFilter {
+                                tab: complete,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                                ..Default::default()
+                            },
+                        )
+                    });
                 }
                 let enter =
                     field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -1785,8 +1771,31 @@ impl Desktop {
         );
     }
 
-    fn suggestion(&self) -> Option<String> {
-        let token = self.draft.split(char::is_whitespace).next_back()?;
+    fn completion(
+        &self,
+        cursor: Option<egui::text::CCursorRange>,
+    ) -> Option<(std::ops::Range<usize>, String)> {
+        let caret = match cursor {
+            Some(cursor) if cursor.primary.index != cursor.secondary.index => return None,
+            Some(cursor) => self
+                .draft
+                .char_indices()
+                .nth(cursor.primary.index)
+                .map_or(self.draft.len(), |(byte, _)| byte),
+            None => self.draft.len(),
+        };
+        let before = &self.draft[..caret];
+        let start = before.trim_end_matches(|c: char| !c.is_whitespace()).len();
+        let token = &before[start..];
+        let suggestion = self.suggestion(token)?;
+        let end = self.draft[caret..]
+            .find(char::is_whitespace)
+            .map_or(self.draft.len(), |offset| caret + offset);
+        let end = end + usize::from(self.draft[end..].starts_with(' '));
+        Some((start..end, suggestion))
+    }
+
+    fn suggestion(&self, token: &str) -> Option<String> {
         if let Some(prefix) = token.strip_prefix('@').filter(|prefix| !prefix.is_empty()) {
             let lower = prefix.to_ascii_lowercase();
             return self
@@ -1816,149 +1825,188 @@ impl Desktop {
             .map(|emote| emote.prefix.clone())
     }
 
-    fn emote_picker(&mut self, ui: &mut egui::Ui) {
-        card().show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Emotes").strong());
-                ui.label(quiet(format!("{}", self.catalog.emotes.len())));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.small_button("Close").clicked() {
-                        self.show_picker = false;
-                    }
-                    if ui
-                        .selectable_label(self.only_favorites, "Favorites")
-                        .clicked()
-                    {
-                        self.only_favorites = !self.only_favorites;
-                    }
-                });
-            });
-            ui.add(
-                egui::TextEdit::singleline(&mut self.picker_search)
-                    .hint_text("Search DGG emotes")
-                    .desired_width(f32::INFINITY),
-            );
-            let search = self.picker_search.to_ascii_lowercase();
-            let emotes = self
-                .catalog
-                .emotes
-                .values()
-                .filter(|emote| {
-                    emote.prefix.to_ascii_lowercase().contains(&search)
-                        && (!self.only_favorites || self.prefs.favorites.contains(&emote.prefix))
-                })
-                .collect::<Vec<_>>();
-            if emotes.is_empty() {
-                let message = if self.catalog.emotes.is_empty() {
-                    "Waiting for the emote catalog…"
-                } else {
-                    "No matching emotes."
-                };
-                ui.label(quiet(message));
-            }
-            let columns = (ui.available_width() / 70.0).floor().max(3.0) as usize;
-            let row_height = 43.0;
-            let cell_width = (ui.available_width()
-                - (columns as f32 - 1.0) * ui.spacing().item_spacing.x
-                - 10.0)
-                / columns as f32;
-            let height = (ui.available_height() * 0.33).clamp(74.0, 190.0);
-            egui::ScrollArea::vertical()
-                .id_salt("emote_grid")
-                .max_height(height)
-                .show_rows(
-                    ui,
-                    row_height,
-                    emotes.len().div_ceil(columns),
-                    |ui, rows| {
-                        for row in rows {
-                            ui.horizontal(|ui| {
-                                for emote in emotes.iter().skip(row * columns).take(columns) {
-                                    let allowed = emote.allowed(&self.me);
-                                    let cell = ui.allocate_ui_with_layout(
-                                        egui::vec2(cell_width, row_height),
-                                        egui::Layout::top_down(egui::Align::Center),
-                                        |ui| {
-                                            ui.spacing_mut().item_spacing.y = 1.0;
-                                            if let Some(image) = self.images.image(
-                                                ui,
-                                                emote.image.first(),
-                                                emote.sprite,
-                                                24.0,
-                                                self.prefs.animate,
-                                            ) {
-                                                ui.add(
-                                                    image.max_size(egui::vec2(
-                                                        cell_width - 4.0,
-                                                        24.0,
-                                                    )),
-                                                );
-                                            } else {
-                                                ui.label(quiet("…"));
-                                            }
-                                            let color =
-                                                if self.prefs.favorites.contains(&emote.prefix) {
-                                                    ACCENT
-                                                } else if allowed {
-                                                    TEXT
-                                                } else {
-                                                    MUTED
-                                                };
-                                            ui.add(
-                                                egui::Label::new(
-                                                    RichText::new(&emote.prefix)
-                                                        .size(10.0)
-                                                        .color(color),
-                                                )
-                                                .truncate(),
-                                            );
-                                        },
-                                    );
-                                    let hit = ui.interact(
-                                        cell.response.rect,
-                                        ui.id().with(("emote", &emote.prefix)),
-                                        egui::Sense::click(),
-                                    );
-                                    if hit.hovered() {
-                                        ui.painter().rect_stroke(
-                                            hit.rect,
-                                            4,
-                                            egui::Stroke::new(1.0_f32, ACCENT),
-                                            egui::StrokeKind::Inside,
-                                        );
-                                    }
-                                    let access = if allowed {
-                                        "Click to insert"
-                                    } else if emote.patreon_only {
-                                        "Patreon emote"
-                                    } else {
-                                        "Subscriber emote"
-                                    };
-                                    let hit = hit.on_hover_text(format!(
-                                        "{} · {}\n{} · Right-click to favorite",
-                                        emote.prefix,
-                                        emote
-                                            .creator
-                                            .as_deref()
-                                            .filter(|name| !name.is_empty())
-                                            .unwrap_or("DGG"),
-                                        access
-                                    ));
-                                    if hit.clicked() && allowed {
-                                        insert_word(&mut self.draft, &emote.prefix);
-                                        self.focus_input = true;
-                                    }
-                                    if hit.secondary_clicked()
-                                        && !self.prefs.favorites.remove(&emote.prefix)
-                                    {
-                                        self.prefs.favorites.insert(emote.prefix.clone());
-                                    }
-                                }
-                            });
-                        }
-                    },
+    fn emote_drawer(&mut self, ui: &mut egui::Ui) {
+        let available = ui.available_rect_before_wrap();
+        let max = (available.height() - 75.0).max(0.0);
+        if max < 100.0 {
+            return;
+        }
+        let min = 134.0_f32.min(max);
+        let height = self.prefs.emote_drawer_height.clamp(min, max);
+        egui::TopBottomPanel::bottom("emote_drawer")
+            .exact_height(height)
+            .show_separator_line(false)
+            .frame(card().inner_margin(egui::Margin {
+                top: 0,
+                ..egui::Margin::same(10)
+            }))
+            .show_inside(ui, |ui| {
+                let (grip, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 12.0),
+                    egui::Sense::hover(),
                 );
+                let edge = available.bottom() - height;
+                let (y, hovered) =
+                    resize_edge(ui, grip, edge, |pos| pos.y, &mut self.emote_resize_offset);
+                if let Some(y) = y {
+                    self.prefs.emote_drawer_height = (available.bottom() - y).clamp(min, max);
+                    ui.ctx().request_repaint();
+                }
+                let color = if hovered || self.emote_resize_offset.is_some() {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    ACCENT
+                } else {
+                    MUTED
+                };
+                ui.painter().rect_filled(
+                    egui::Rect::from_center_size(grip.center(), egui::vec2(32.0, 3.0)),
+                    2,
+                    color,
+                );
+                self.emote_picker(ui);
+            });
+    }
+
+    fn emote_picker(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Emotes").strong());
+            ui.label(quiet(format!("{}", self.catalog.emotes.len())));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("Close").clicked() {
+                    self.show_picker = false;
+                }
+                if ui
+                    .selectable_label(self.only_favorites, "Favorites")
+                    .clicked()
+                {
+                    self.only_favorites = !self.only_favorites;
+                }
+            });
         });
+        ui.add(
+            egui::TextEdit::singleline(&mut self.picker_search)
+                .hint_text("Search DGG emotes")
+                .desired_width(f32::INFINITY),
+        );
+        let search = self.picker_search.to_ascii_lowercase();
+        let emotes = self
+            .catalog
+            .emotes
+            .values()
+            .filter(|emote| {
+                emote.prefix.to_ascii_lowercase().contains(&search)
+                    && (!self.only_favorites || self.prefs.favorites.contains(&emote.prefix))
+            })
+            .collect::<Vec<_>>();
+        if emotes.is_empty() {
+            let message = if self.catalog.emotes.is_empty() {
+                "Waiting for the emote catalog…"
+            } else {
+                "No matching emotes."
+            };
+            ui.label(quiet(message));
+        }
+        let columns = (ui.available_width() / 70.0).floor().max(3.0) as usize;
+        let row_height = 43.0;
+        let cell_width =
+            (ui.available_width() - (columns as f32 - 1.0) * ui.spacing().item_spacing.x - 10.0)
+                / columns as f32;
+        let height = ui.available_height().max(0.0);
+        egui::ScrollArea::vertical()
+            .id_salt("emote_grid")
+            .auto_shrink([false, false])
+            .max_height(height)
+            .show_rows(
+                ui,
+                row_height,
+                emotes.len().div_ceil(columns),
+                |ui, rows| {
+                    for row in rows {
+                        ui.horizontal(|ui| {
+                            for emote in emotes.iter().skip(row * columns).take(columns) {
+                                let allowed = emote.allowed(&self.me);
+                                let cell = ui.allocate_ui_with_layout(
+                                    egui::vec2(cell_width, row_height),
+                                    egui::Layout::top_down(egui::Align::Center),
+                                    |ui| {
+                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                        if let Some(image) = self.images.image(
+                                            ui,
+                                            emote.image.first(),
+                                            emote.sprite,
+                                            24.0,
+                                            self.prefs.animate,
+                                        ) {
+                                            ui.add(
+                                                image.max_size(egui::vec2(cell_width - 4.0, 24.0)),
+                                            );
+                                        } else {
+                                            ui.label(quiet("…"));
+                                        }
+                                        let color = if self.prefs.favorites.contains(&emote.prefix)
+                                        {
+                                            ACCENT
+                                        } else if allowed {
+                                            TEXT
+                                        } else {
+                                            MUTED
+                                        };
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(&emote.prefix)
+                                                    .size(10.0)
+                                                    .color(color),
+                                            )
+                                            .truncate(),
+                                        );
+                                    },
+                                );
+                                let hit = ui.interact(
+                                    cell.response.rect,
+                                    ui.id().with(("emote", &emote.prefix)),
+                                    egui::Sense::click(),
+                                );
+                                if hit.hovered() {
+                                    ui.painter().rect_stroke(
+                                        hit.rect,
+                                        4,
+                                        egui::Stroke::new(1.0_f32, ACCENT),
+                                        egui::StrokeKind::Inside,
+                                    );
+                                }
+                                let access = if allowed {
+                                    "Click to insert"
+                                } else if emote.patreon_only {
+                                    "Patreon emote"
+                                } else {
+                                    "Subscriber emote"
+                                };
+                                let hit = hit.on_hover_text(format!(
+                                    "{} · {}\n{} · Right-click to favorite",
+                                    emote.prefix,
+                                    emote
+                                        .creator
+                                        .as_deref()
+                                        .filter(|name| !name.is_empty())
+                                        .unwrap_or("DGG"),
+                                    access
+                                ));
+                                if hit.clicked() && allowed {
+                                    insert_word(&mut self.draft, &emote.prefix);
+                                    self.focus_input = true;
+                                    ui.ctx().request_repaint();
+                                    ui.ctx().request_repaint();
+                                }
+                                if hit.secondary_clicked()
+                                    && !self.prefs.favorites.remove(&emote.prefix)
+                                {
+                                    self.prefs.favorites.insert(emote.prefix.clone());
+                                }
+                            }
+                        });
+                    }
+                },
+            );
     }
 
     fn post(&mut self, ui: &mut egui::Ui, post: &Post, kind: LineKind, menu: bool) {
@@ -2093,6 +2141,53 @@ impl Desktop {
             }
         });
     }
+}
+
+fn resize_edge(
+    ui: &egui::Ui,
+    grip: egui::Rect,
+    edge: f32,
+    coordinate: impl Fn(egui::Pos2) -> f32,
+    offset: &mut Option<f32>,
+) -> (Option<f32>, bool) {
+    ui.input(|input| {
+        let mut position = None;
+        // Anchor to the press position even if movement and release arrive in the same frame.
+        for event in &input.events {
+            match event {
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    ..
+                } if grip.contains(*pos) => *offset = Some(coordinate(*pos) - edge),
+                egui::Event::PointerMoved(pos) => {
+                    if let Some(offset) = *offset {
+                        position = Some(coordinate(*pos) - offset);
+                    }
+                }
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    ..
+                } => {
+                    if let Some(offset) = offset.take() {
+                        position = Some(coordinate(*pos) - offset);
+                    }
+                }
+                egui::Event::WindowFocused(false) => *offset = None,
+                _ => {}
+            }
+        }
+        (
+            position,
+            input
+                .pointer
+                .hover_pos()
+                .is_some_and(|pos| grip.contains(pos)),
+        )
+    })
 }
 
 fn insert_word(draft: &mut String, word: &str) {

@@ -58,7 +58,7 @@ Click **Hide video** in the header to unload the player and stop fetching video.
 
 ## Emotes and flairs
 
-Click **Emotes** to search the DGG catalog. Click an available emote to add it to your draft, or right-click to favorite it. Type the first few letters of an emote and press **Tab** to complete it. For usernames, start with **@**.
+Click **Emotes** to search the DGG catalog. Click an available emote to add it to your draft, or right-click to favorite it. Drag the handle at the top of the emote drawer to resize it. The app remembers its height. Type the first few letters of an emote and press **Tab** to complete it and insert a space. Keep typing in the same message box. For usernames, start with **@**.
 
 The app fetches emotes and flairs from the DGG CDN and reads sprite dimensions and timing from DGG’s stylesheet. The native renderer approximates some website-specific CSS effects. macOS decodes AVIF, including animated AVIF. The experimental Windows and Linux decoder handles PNG, JPEG, GIF, and WebP. AVIF emotes use their text fallback on those platforms.
 
