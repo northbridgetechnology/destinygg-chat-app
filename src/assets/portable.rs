@@ -12,20 +12,21 @@ pub(super) fn decode(data: &[u8]) -> Result<Decoded, String> {
     limits.max_image_width = Some(8192);
     limits.max_image_height = Some(512);
     limits.max_alloc = Some(MAX_BYTES as u64);
-    let cursor = Cursor::new(data);
-    let mut reader = ImageReader::new(cursor)
+    let mut reader = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .map_err(|error| error.to_string())?;
     match reader.format() {
         Some(ImageFormat::Gif) => {
-            let mut decoder = GifDecoder::new(cursor).map_err(|error| error.to_string())?;
+            let mut decoder =
+                GifDecoder::new(Cursor::new(data)).map_err(|error| error.to_string())?;
             decoder
                 .set_limits(limits)
                 .map_err(|error| error.to_string())?;
             return animated(decoder);
         }
         Some(ImageFormat::WebP) => {
-            let mut decoder = WebPDecoder::new(cursor).map_err(|error| error.to_string())?;
+            let mut decoder =
+                WebPDecoder::new(Cursor::new(data)).map_err(|error| error.to_string())?;
             decoder
                 .set_limits(limits.clone())
                 .map_err(|error| error.to_string())?;
@@ -34,7 +35,8 @@ pub(super) fn decode(data: &[u8]) -> Result<Decoded, String> {
             }
         }
         Some(ImageFormat::Png) => {
-            let mut decoder = PngDecoder::new(cursor).map_err(|error| error.to_string())?;
+            let mut decoder =
+                PngDecoder::new(Cursor::new(data)).map_err(|error| error.to_string())?;
             decoder
                 .set_limits(limits.clone())
                 .map_err(|error| error.to_string())?;
