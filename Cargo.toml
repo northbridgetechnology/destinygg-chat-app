@@ -32,6 +32,7 @@ keyring = { version = "3.6", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.31.1", default-features = false, features = ["x11"] }
+wry = { version = "0.57.1", default-features = false, features = ["x11"] }
 gtk = "0.18"
 keyring = { version = "3.6", features = ["sync-secret-service", "crypto-rust"] }
 
