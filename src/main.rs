@@ -11,6 +11,11 @@ use eframe::egui;
 fn main() -> eframe::Result {
     #[cfg(target_os = "linux")]
     {
+        if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+            // WebKitGTK's DMA-BUF compositor renders a black surface with the
+            // proprietary NVIDIA driver. Disable it unless the user overrides this.
+            unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+        }
         gtk::gdk::set_allowed_backends("x11");
         gtk::init().map_err(|error| eframe::Error::AppCreation(Box::new(error)))?;
     }
