@@ -109,10 +109,17 @@ For Debian or Ubuntu releases with WebKitGTK 4.1 packages:
 
 ```sh
 sudo apt install build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev \
-  libssl-dev libdbus-1-dev libxkbcommon-dev libgl1-mesa-dev
+  libssl-dev libdbus-1-dev libxkbcommon-dev libgl1-mesa-dev \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-plugins-ugly gstreamer1.0-libav
 cargo run --locked
 cargo build --release --locked
 ```
+
+WebKitGTK decodes video through GStreamer. Distributions that package it separately
+from its codec plugins, such as Arch and its derivatives, need their equivalents
+installed too (`gst-plugins-base`, `gst-plugins-good`, `gst-plugins-bad`,
+`gst-plugins-ugly`, `gst-libav`), or the player loads with no video or audio.
 
 Cargo places the release executable in `target/release/dgg-desktop`.
 
@@ -125,6 +132,7 @@ Cargo places the release executable in `target/release/dgg-desktop`.
 | Chat displays emote names | Give the CDN catalog time to load, or use **Refresh assets** in preferences. |
 | Chat is disconnected | The app retries automatically. Hover over the connection status for details. |
 | Linux cannot create the player or the sign-in view | Check that GTK and WebKitGTK are installed and that an X11 display is available. |
+| Linux player loads blank with no video or audio | Install your distribution's GStreamer codec plugins (see Linux build instructions). The app also disables WebKitGTK's DMA-BUF renderer by default, which otherwise renders a black surface on NVIDIA's proprietary driver; set `WEBKIT_DISABLE_DMABUF_RENDERER=0` to re-enable it if your setup doesn't need the workaround. |
 | Sign-in works but the session is forgotten on Linux | Check that your desktop Secret Service is running and its collection is unlocked. |
 
 ## Code and verification
